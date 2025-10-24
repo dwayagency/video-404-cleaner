@@ -50,10 +50,135 @@ class Video_404_Cleaner {
     }
 
     public function activate() {
-        if (! wp_next_scheduled(self::CRON_HOOK)) {
-            wp_schedule_event(time() + 60, 'weekly', self::CRON_HOOK);
-        }
+        $this->schedule_cron_job();
         $this->log('Plugin activated');
+    }
+
+    private function schedule_cron_job() {
+        // Clear existing scheduled events
+        $timestamp = wp_next_scheduled(self::CRON_HOOK);
+        if ($timestamp) {
+            wp_unschedule_event($timestamp, self::CRON_HOOK);
+        }
+
+        $settings = $this->get_settings();
+        
+        if (!$settings['auto_scan_enabled']) {
+            return;
+        }
+
+        $next_run = $this->calculate_next_run_time($settings);
+        
+        if ($next_run) {
+            wp_schedule_event($next_run, $this->get_cron_schedule($settings), self::CRON_HOOK);
+            $this->log('Cron job scheduled for: ' . date('Y-m-d H:i:s', $next_run));
+        }
+    }
+
+    private function calculate_next_run_time($settings) {
+        $now = current_time('timestamp');
+        $scan_time = $settings['scan_time'];
+        
+        switch ($settings['scan_frequency']) {
+            case 'daily':
+                return $this->get_next_daily_time($now, $scan_time);
+                
+            case 'weekly':
+                return $this->get_next_weekly_time($now, $scan_time, $settings['scan_days']);
+                
+            case 'monthly':
+                return $this->get_next_monthly_time($now, $scan_time);
+                
+            case 'custom':
+                return $this->get_custom_date_time($settings['scan_date'], $scan_time);
+                
+            default:
+                return $now + 60; // Default: 1 minute from now
+        }
+    }
+
+    private function get_next_daily_time($now, $scan_time) {
+        $today = date('Y-m-d', $now);
+        $today_time = strtotime($today . ' ' . $scan_time);
+        
+        if ($today_time > $now) {
+            return $today_time;
+        } else {
+            return strtotime('+1 day', $today_time);
+        }
+    }
+
+    private function get_next_weekly_time($now, $scan_time, $scan_days) {
+        if (empty($scan_days)) {
+            return $now + 60;
+        }
+        
+        $next_times = [];
+        foreach ($scan_days as $day) {
+            $next_day = $this->get_next_weekday($now, $day, $scan_time);
+            if ($next_day) {
+                $next_times[] = $next_day;
+            }
+        }
+        
+        return !empty($next_times) ? min($next_times) : $now + 60;
+    }
+
+    private function get_next_weekday($now, $target_day, $scan_time) {
+        $current_day = date('w', $now); // 0 = Sunday, 1 = Monday, etc.
+        $days_until_target = ($target_day - $current_day + 7) % 7;
+        
+        if ($days_until_target === 0) {
+            // Same day, check if time has passed
+            $today_time = strtotime(date('Y-m-d', $now) . ' ' . $scan_time);
+            if ($today_time > $now) {
+                return $today_time;
+            } else {
+                $days_until_target = 7; // Next week
+            }
+        }
+        
+        $target_date = date('Y-m-d', strtotime("+{$days_until_target} days", $now));
+        return strtotime($target_date . ' ' . $scan_time);
+    }
+
+    private function get_next_monthly_time($now, $scan_time) {
+        $current_month = date('Y-m', $now);
+        $current_day = date('d', $now);
+        
+        // Try same day this month
+        $this_month_time = strtotime($current_month . '-' . $current_day . ' ' . $scan_time);
+        if ($this_month_time > $now) {
+            return $this_month_time;
+        }
+        
+        // Next month, same day
+        $next_month = date('Y-m', strtotime('+1 month', $now));
+        return strtotime($next_month . '-' . $current_day . ' ' . $scan_time);
+    }
+
+    private function get_custom_date_time($scan_date, $scan_time) {
+        if (empty($scan_date)) {
+            return current_time('timestamp') + 60;
+        }
+        
+        $custom_time = strtotime($scan_date . ' ' . $scan_time);
+        return $custom_time > current_time('timestamp') ? $custom_time : null;
+    }
+
+    private function get_cron_schedule($settings) {
+        switch ($settings['scan_frequency']) {
+            case 'daily':
+                return 'daily';
+            case 'weekly':
+                return 'weekly';
+            case 'monthly':
+                return 'monthly';
+            case 'custom':
+                return 'daily'; // Will be rescheduled based on custom date
+            default:
+                return 'weekly';
+        }
     }
 
     public function deactivate() {
@@ -357,6 +482,17 @@ class Video_404_Cleaner {
         ?>
         <div class="wrap">
             <h1><?php _e('Video 404 Cleaner - Settings', 'video-404-cleaner'); ?></h1>
+            
+            <?php 
+            $next_scheduled = wp_next_scheduled(self::CRON_HOOK);
+            if ($next_scheduled): ?>
+                <div class="notice notice-info">
+                    <p><strong><?php _e('Next scheduled scan:', 'video-404-cleaner'); ?></strong> 
+                       <?php echo date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $next_scheduled); ?>
+                    </p>
+                </div>
+            <?php endif; ?>
+            
             <?php $this->render_settings_tab($settings); ?>
         </div>
         <?php
@@ -434,11 +570,15 @@ class Video_404_Cleaner {
             'http_timeout' => intval($_POST['http_timeout'] ?? self::HTTP_TIMEOUT),
             'auto_scan_enabled' => isset($_POST['auto_scan_enabled']),
             'scan_frequency' => sanitize_text_field($_POST['scan_frequency'] ?? 'weekly'),
+            'scan_time' => sanitize_text_field($_POST['scan_time'] ?? '02:00'),
+            'scan_days' => array_map('intval', $_POST['scan_days'] ?? [1]), // 1 = Monday
+            'scan_date' => sanitize_text_field($_POST['scan_date'] ?? ''),
             'log_enabled' => isset($_POST['log_enabled']),
             'error_codes' => array_map('intval', $_POST['error_codes'] ?? [404]),
         ];
 
         update_option(self::OPTION_SETTINGS, $settings);
+        $this->schedule_cron_job(); // Reschedule cron job with new settings
         $this->log('Settings updated');
 
         wp_redirect(admin_url('admin.php?page=video-404-cleaner-settings&updated=1'));
@@ -451,6 +591,9 @@ class Video_404_Cleaner {
             'http_timeout' => self::HTTP_TIMEOUT,
             'auto_scan_enabled' => true,
             'scan_frequency' => 'weekly',
+            'scan_time' => '02:00',
+            'scan_days' => [1], // Monday
+            'scan_date' => '',
             'log_enabled' => true,
             'error_codes' => [404, 403, 500, 502, 503, 504],
         ];
@@ -503,11 +646,40 @@ class Video_404_Cleaner {
                     <tr>
                         <th scope="row"><?php _e('Scan Frequency', 'video-404-cleaner'); ?></th>
                         <td>
-                            <select name="scan_frequency">
+                            <select name="scan_frequency" id="scan_frequency" onchange="toggleScheduleOptions()">
                                 <option value="daily" <?php selected($settings['scan_frequency'], 'daily'); ?>><?php _e('Daily', 'video-404-cleaner'); ?></option>
                                 <option value="weekly" <?php selected($settings['scan_frequency'], 'weekly'); ?>><?php _e('Weekly', 'video-404-cleaner'); ?></option>
                                 <option value="monthly" <?php selected($settings['scan_frequency'], 'monthly'); ?>><?php _e('Monthly', 'video-404-cleaner'); ?></option>
+                                <option value="custom" <?php selected($settings['scan_frequency'], 'custom'); ?>><?php _e('Custom Date', 'video-404-cleaner'); ?></option>
                             </select>
+                        </td>
+                    </tr>
+                    <tr id="scan_time_row">
+                        <th scope="row"><?php _e('Scan Time', 'video-404-cleaner'); ?></th>
+                        <td>
+                            <input type="time" name="scan_time" value="<?php echo esc_attr($settings['scan_time']); ?>" />
+                            <p class="description"><?php _e('Time of day to run automatic scans (24-hour format).', 'video-404-cleaner'); ?></p>
+                        </td>
+                    </tr>
+                    <tr id="scan_days_row" style="display: none;">
+                        <th scope="row"><?php _e('Days of Week', 'video-404-cleaner'); ?></th>
+                        <td>
+                            <fieldset>
+                                <label><input type="checkbox" name="scan_days[]" value="1" <?php checked(in_array(1, $settings['scan_days'])); ?> /> <?php _e('Monday', 'video-404-cleaner'); ?></label><br>
+                                <label><input type="checkbox" name="scan_days[]" value="2" <?php checked(in_array(2, $settings['scan_days'])); ?> /> <?php _e('Tuesday', 'video-404-cleaner'); ?></label><br>
+                                <label><input type="checkbox" name="scan_days[]" value="3" <?php checked(in_array(3, $settings['scan_days'])); ?> /> <?php _e('Wednesday', 'video-404-cleaner'); ?></label><br>
+                                <label><input type="checkbox" name="scan_days[]" value="4" <?php checked(in_array(4, $settings['scan_days'])); ?> /> <?php _e('Thursday', 'video-404-cleaner'); ?></label><br>
+                                <label><input type="checkbox" name="scan_days[]" value="5" <?php checked(in_array(5, $settings['scan_days'])); ?> /> <?php _e('Friday', 'video-404-cleaner'); ?></label><br>
+                                <label><input type="checkbox" name="scan_days[]" value="6" <?php checked(in_array(6, $settings['scan_days'])); ?> /> <?php _e('Saturday', 'video-404-cleaner'); ?></label><br>
+                                <label><input type="checkbox" name="scan_days[]" value="0" <?php checked(in_array(0, $settings['scan_days'])); ?> /> <?php _e('Sunday', 'video-404-cleaner'); ?></label>
+                            </fieldset>
+                        </td>
+                    </tr>
+                    <tr id="scan_date_row" style="display: none;">
+                        <th scope="row"><?php _e('Custom Date', 'video-404-cleaner'); ?></th>
+                        <td>
+                            <input type="date" name="scan_date" value="<?php echo esc_attr($settings['scan_date']); ?>" />
+                            <p class="description"><?php _e('Specific date to run the scan (leave empty for next occurrence).', 'video-404-cleaner'); ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -538,6 +710,30 @@ class Video_404_Cleaner {
 
                 <?php submit_button(__('Save Settings', 'video-404-cleaner')); ?>
             </form>
+
+            <script>
+            function toggleScheduleOptions() {
+                var frequency = document.getElementById('scan_frequency').value;
+                var daysRow = document.getElementById('scan_days_row');
+                var dateRow = document.getElementById('scan_date_row');
+                
+                // Hide all optional rows first
+                daysRow.style.display = 'none';
+                dateRow.style.display = 'none';
+                
+                // Show relevant rows based on selection
+                if (frequency === 'weekly') {
+                    daysRow.style.display = 'table-row';
+                } else if (frequency === 'custom') {
+                    dateRow.style.display = 'table-row';
+                }
+            }
+            
+            // Initialize on page load
+            document.addEventListener('DOMContentLoaded', function() {
+                toggleScheduleOptions();
+            });
+            </script>
         </div>
         <?php
     }
