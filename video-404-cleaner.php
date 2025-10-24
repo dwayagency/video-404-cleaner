@@ -38,6 +38,7 @@ class Video_404_Cleaner {
         add_action('admin_post_video_404_settings', [$this, 'handle_settings_save']);
         add_action('wp_ajax_video_404_batch', [$this, 'handle_batch_scan']);
         add_action(self::CRON_HOOK, [$this, 'cron_scan']);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_styles']);
 
         add_filter('cron_schedules', [$this, 'add_weekly_schedule']);
         register_activation_hook(__FILE__, [$this, 'activate']);
@@ -94,13 +95,86 @@ class Video_404_Cleaner {
         return $schedules;
     }
 
+    public function enqueue_admin_styles($hook) {
+        // Only load on our plugin pages
+        if (strpos($hook, 'video-404-cleaner') === false) {
+            return;
+        }
+
+        wp_add_inline_style('wp-admin', '
+            .video-404-cleaner-header {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 20px;
+                margin: -20px -20px 20px -20px;
+                border-radius: 0 0 8px 8px;
+            }
+            .video-404-cleaner-header h1 {
+                color: white;
+                margin: 0;
+                font-size: 24px;
+            }
+            .video-404-cleaner-stats {
+                display: flex;
+                gap: 20px;
+                margin-top: 15px;
+            }
+            .video-404-cleaner-stat {
+                background: rgba(255,255,255,0.1);
+                padding: 10px 15px;
+                border-radius: 5px;
+                text-align: center;
+            }
+            .video-404-cleaner-stat-number {
+                font-size: 20px;
+                font-weight: bold;
+                display: block;
+            }
+            .video-404-cleaner-stat-label {
+                font-size: 12px;
+                opacity: 0.8;
+            }
+        ');
+    }
+
     public function add_tools_page() {
-        add_management_page(
+        // Add main menu page
+        add_menu_page(
             __('Video 404 Cleaner', 'video-404-cleaner'),
             __('Video 404 Cleaner', 'video-404-cleaner'),
             'manage_options',
             'video-404-cleaner',
+            [$this, 'render_tools_page'],
+            'dashicons-video-alt3',
+            30
+        );
+
+        // Add submenu pages
+        add_submenu_page(
+            'video-404-cleaner',
+            __('Scan Videos', 'video-404-cleaner'),
+            __('Scan Videos', 'video-404-cleaner'),
+            'manage_options',
+            'video-404-cleaner',
             [$this, 'render_tools_page']
+        );
+
+        add_submenu_page(
+            'video-404-cleaner',
+            __('Settings', 'video-404-cleaner'),
+            __('Settings', 'video-404-cleaner'),
+            'manage_options',
+            'video-404-cleaner-settings',
+            [$this, 'render_settings_page']
+        );
+
+        add_submenu_page(
+            'video-404-cleaner',
+            __('Logs', 'video-404-cleaner'),
+            __('Logs', 'video-404-cleaner'),
+            'manage_options',
+            'video-404-cleaner-logs',
+            [$this, 'render_logs_page']
         );
     }
 
@@ -109,30 +183,28 @@ class Video_404_Cleaner {
             wp_die(__('You do not have sufficient permissions to access this page.'));
         }
 
-        $current_tab = $_GET['tab'] ?? 'scan';
         $last_report = get_option(self::OPTION_LAST_REPORT);
         $total_videos = $this->get_total_video_count();
         $settings = $this->get_settings();
         ?>
         <div class="wrap">
-            <h1><?php _e('Video 404 Cleaner', 'video-404-cleaner'); ?></h1>
-            
-            <nav class="nav-tab-wrapper">
-                <a href="<?php echo admin_url('tools.php?page=video-404-cleaner&tab=scan'); ?>" 
-                   class="nav-tab <?php echo $current_tab === 'scan' ? 'nav-tab-active' : ''; ?>">
-                   <?php _e('Scan Videos', 'video-404-cleaner'); ?>
-                </a>
-                <a href="<?php echo admin_url('tools.php?page=video-404-cleaner&tab=settings'); ?>" 
-                   class="nav-tab <?php echo $current_tab === 'settings' ? 'nav-tab-active' : ''; ?>">
-                   <?php _e('Settings', 'video-404-cleaner'); ?>
-                </a>
-                <a href="<?php echo admin_url('tools.php?page=video-404-cleaner&tab=logs'); ?>" 
-                   class="nav-tab <?php echo $current_tab === 'logs' ? 'nav-tab-active' : ''; ?>">
-                   <?php _e('Logs', 'video-404-cleaner'); ?>
-                </a>
-            </nav>
-
-            <?php if ($current_tab === 'scan'): ?>
+            <div class="video-404-cleaner-header">
+                <h1><?php _e('Video 404 Cleaner', 'video-404-cleaner'); ?></h1>
+                <div class="video-404-cleaner-stats">
+                    <div class="video-404-cleaner-stat">
+                        <span class="video-404-cleaner-stat-number"><?php echo intval($total_videos); ?></span>
+                        <span class="video-404-cleaner-stat-label"><?php _e('Total Videos', 'video-404-cleaner'); ?></span>
+                    </div>
+                    <div class="video-404-cleaner-stat">
+                        <span class="video-404-cleaner-stat-number"><?php echo intval($last_report['broken_count'] ?? 0); ?></span>
+                        <span class="video-404-cleaner-stat-label"><?php _e('Last Scan - Broken', 'video-404-cleaner'); ?></span>
+                    </div>
+                    <div class="video-404-cleaner-stat">
+                        <span class="video-404-cleaner-stat-number"><?php echo $last_report ? date('M j', strtotime($last_report['when'])) : '—'; ?></span>
+                        <span class="video-404-cleaner-stat-label"><?php _e('Last Scan Date', 'video-404-cleaner'); ?></span>
+                    </div>
+                </div>
+            </div>
             
             <?php if (!empty($this->errors)): ?>
                 <div class="notice notice-error">
@@ -272,14 +344,41 @@ class Video_404_Cleaner {
             });
         });
         </script>
-        
-        <?php elseif ($current_tab === 'settings'): ?>
+        </div>
+        <?php
+    }
+
+    public function render_settings_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die(__('You do not have sufficient permissions to access this page.'));
+        }
+
+        $settings = $this->get_settings();
+        ?>
+        <div class="wrap">
+            <h1><?php _e('Video 404 Cleaner - Settings', 'video-404-cleaner'); ?></h1>
             <?php $this->render_settings_tab($settings); ?>
-        
-        <?php elseif ($current_tab === 'logs'): ?>
+        </div>
+        <?php
+    }
+
+    public function render_logs_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die(__('You do not have sufficient permissions to access this page.'));
+        }
+
+        // Handle clear logs action
+        if (isset($_GET['action']) && $_GET['action'] === 'clear_logs') {
+            if (file_exists($this->log_file)) {
+                file_put_contents($this->log_file, '');
+                echo '<div class="notice notice-success"><p>' . __('Logs cleared successfully!', 'video-404-cleaner') . '</p></div>';
+            }
+        }
+
+        ?>
+        <div class="wrap">
+            <h1><?php _e('Video 404 Cleaner - Logs', 'video-404-cleaner'); ?></h1>
             <?php $this->render_logs_tab(); ?>
-        
-        <?php endif; ?>
         </div>
         <?php
     }
@@ -298,7 +397,7 @@ class Video_404_Cleaner {
         update_option(self::OPTION_LAST_REPORT, $report, false);
         $this->log('Manual scan completed');
 
-        wp_redirect(admin_url('tools.php?page=video-404-cleaner'));
+        wp_redirect(admin_url('admin.php?page=video-404-cleaner'));
         exit;
     }
 
@@ -342,7 +441,7 @@ class Video_404_Cleaner {
         update_option(self::OPTION_SETTINGS, $settings);
         $this->log('Settings updated');
 
-        wp_redirect(admin_url('tools.php?page=video-404-cleaner&tab=settings&updated=1'));
+        wp_redirect(admin_url('admin.php?page=video-404-cleaner-settings&updated=1'));
         exit;
     }
 
@@ -460,7 +559,7 @@ class Video_404_Cleaner {
                     <button type="button" class="button" onclick="document.getElementById('log-content').select();">
                         <?php _e('Select All', 'video-404-cleaner'); ?>
                     </button>
-                    <button type="button" class="button" onclick="if(confirm('<?php _e('Are you sure you want to clear the logs?', 'video-404-cleaner'); ?>')) { window.location.href='<?php echo admin_url('tools.php?page=video-404-cleaner&tab=logs&action=clear_logs'); ?>'; }">
+                    <button type="button" class="button" onclick="if(confirm('<?php _e('Are you sure you want to clear the logs?', 'video-404-cleaner'); ?>')) { window.location.href='<?php echo admin_url('admin.php?page=video-404-cleaner-logs&action=clear_logs'); ?>'; }">
                         <?php _e('Clear Logs', 'video-404-cleaner'); ?>
                     </button>
                 </p>
